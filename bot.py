@@ -16,11 +16,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_TOKEN = os.getenv("8674194296:AAGqxTPggfH52IyefdVP8565SFOJcmspOwI")
 GEMINI_API_KEY = os.getenv("AIzaSyAtbh18iZwr9qgcjgCCUeb1Q3emwKzgJEg")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN not set!")
-if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not set!")
-
 # =============== GEMINI SETUP ===============
 genai.configure(api_key=GEMINI_API_KEY)
 
