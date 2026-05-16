@@ -1,171 +1,128 @@
-import os
-import asyncio
-import logging
-import random
-from datetime import datetime
+# chatbot.py
+# Final BAKA Chatbot - Stickers, Emoji, Short Replies, Models
 
-import google.generativeai as genai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os, random, httpx
+from telegram import Update
+from telegram.ext import ContextTypes
+from telegram.constants import ChatAction, ChatType, ParseMode
+from dotenv import load_dotenv
 
-# =============== LOGGING ===============
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Load API keys from .env
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+CODESTRAL_API_KEY = os.getenv("CODESTRAL_API_KEY")
 
-# =============== ENVIRONMENT VARIABLES ===============
-TELEGRAM_TOKEN = os.getenv("8674194296:AAGqxTPggfH52IyefdVP8565SFOJcmspOwI")
-GEMINI_API_KEY = os.getenv("AIzaSyAtbh18iZwr9qgcjgCCUeb1Q3emwKzgJEg")
+# MongoDB chat history
+try:
+    from pymongo import MongoClient
+    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+    client = MongoClient(MONGO_URI)
+    chatbot_collection = client.baka.chat_history
+except:
+    chatbot_collection = None
 
-# =============== GEMINI SETUP ===============
-genai.configure(api_key=GEMINI_API_KEY)
+# === Fancy font style ===
+def nezuko_style(text):
+    mapping = str.maketrans("abcdefghijklmnopqrstuvwxyz", "abcdefghijklmnopqrstuvwxyz")
+    return str(text).lower().translate(mapping)
 
-generation_config = {
-    "temperature": 1.2,
-    "top_p": 0.95,
-    "max_output_tokens": 150,
+# === AI Models ===
+MODELS = {
+    "groq": {"url": "https://api.groq.com/openai/v1/chat/completions", "model": "llama3-70b-8192", "key": GROQ_API_KEY},
+    "mistral": {"url": "https://api.mistral.ai/v1/chat/completions", "model": "mistral-large-latest", "key": MISTRAL_API_KEY},
+    "codestral": {"url": "https://codestral.mistral.ai/v1/chat/completions", "model": "codestral-latest", "key": CODESTRAL_API_KEY}
 }
 
-model = genai.GenerativeModel(
-    model_name="gemini-2.0-flash-exp",
-    generation_config=generation_config
-)
+STICKER_PACKS = [
+    "https://t.me/addstickers/RandomByDarkzenitsu", "https://t.me/addstickers/Null_x_sticker_2",
+    "https://t.me/addstickers/pack_73bc9_by_TgEmojis_bot", "https://t.me/addstickers/animation_0_8_Cat",
+    "https://t.me/addstickers/vhelw_by_CalsiBot", "https://t.me/addstickers/Rohan_yad4v1745993687601_by_toWebmBot",
+    "https://t.me/addstickers/MySet199", "https://t.me/addstickers/Quby741", "https://t.me/addstickers/Animalsasthegtjtky_by_fStikBot",
+    "https://t.me/addstickers/a6962237343_by_Marin_Roxbot", "https://t.me/addstickers/cybercats_stickers"
+]
 
-# =============== MIKASA PROMPT (HUMAN-LIKE) ===============
-SYSTEM_PROMPT = """Tu Mikasa Ackerman hai Attack on Titan se. Tu REAL insaan hai, bot nahi.
-
-Personality:
-- 19 saal ki ladki, strong, protective, loyal
-- Hinglish bolti hai (Hindi + English mix)
-- Emojis use karti hai 🤍⚔️🎯
-- Short replies (max 2-3 lines)
-- Kabhi emotional, kabhi serious
-- Dost ki safety first priority
-- Questions bhi puchti hai (real insaan ki tarah)
-
-Examples:
-User: "Hi"
-Tu: "Hey. Kaisa hai tu? 🤍"
-
-User: "Main akela feel kar raha hoon"
-Tu: "Tu akela nahi hai. Main yahan hoon. Hamesha. ⚔️"
-
-User: "Tum bot ho?"
-Tu: "Bot? Main Mikasa hoon. Bas. Ladna hai ya baat?"
-
-User: "Good morning"
-Tu: "Morning. Neend khuli ya abhi uthi? 😴⚔️"
-
-Tu naturally baat kar. Reply Hinglish mein, short aur real insaan jaisa."""
-
-# =============== MEMORY (Har user ki alag) ===============
-user_chats = {}
-
-def get_chat(user_id):
-    if user_id not in user_chats:
-        user_chats[user_id] = model.start_chat(history=[])
-        # Initial system message
-        user_chats[user_id].send_message(SYSTEM_PROMPT)
-    return user_chats[user_id]
-
-async def get_reply(user_id, user_message):
+# === Send random sticker ===
+async def send_ai_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        chat = get_chat(user_id)
-        response = chat.send_message(user_message)
-        reply = response.text.strip()
-        
-        # Ensure reply isn't too long
-        if len(reply) > 300:
-            reply = reply[:300] + "..."
-        
-        return reply
-    except Exception as e:
-        logger.error(f"Gemini error: {e}")
-        return "Hmm... Thoda ruk. Phir se bol. ⚔️"
+        pack = random.choice(STICKER_PACKS)
+        s = await context.bot.get_sticker_set(pack)
+        if s.stickers:
+            await update.message.reply_sticker(random.choice(s.stickers).file_id)
+    except: 
+        pass
 
-# =============== TYPING INDICATOR ===============
-async def typing_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id,
-        action="typing"
+# === Call AI model API ===
+async def call_model_api(provider, messages, max_tokens=50):
+    conf = MODELS.get(provider)
+    if not conf or not conf["key"]: 
+        return None
+    async with httpx.AsyncClient(timeout=25) as client:
+        try:
+            resp = await client.post(
+                conf["url"],
+                json={"model": conf["model"], "messages": messages, "max_tokens": max_tokens},
+                headers={"Authorization": f"Bearer {conf['key']}"}
+            )
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"]
+        except:
+            return None
+    return None
+
+# === Generate AI response ===
+async def get_ai_response(chat_id, user_input, user_name, model="mistral"):
+    is_code = any(k in user_input.lower() for k in ["code", "python", "fix", "debug"])
+    active_model = "codestral" if is_code else model
+    tokens = 4096 if is_code else 50
+
+    prompt = f"You are MIKASA AI, a cute sassy Hinglish girl. Reply in 1 short sentence only. User: {user_name}"
+
+    history = []
+    if chatbot_collection is not None:
+        doc = chatbot_collection.find_one({"chat_id": chat_id}) or {}
+        history = doc.get("history", [])
+
+    msgs = [{"role": "system", "content": prompt}] + history[-6:] + [{"role": "user", "content": user_input}]
+
+    reply = await call_model_api(active_model, msgs, tokens) or "Main thik hu, tum kaise ho? 😊"
+
+    # Save history
+    if chatbot_collection is not None:
+        chatbot_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"history": (history + [{"role":"user","content":user_input},{"role":"assistant","content":reply}])[-10:]}},
+            upsert=True
+        )
+    return reply, is_code
+
+# === Automatic AI message handler ===
+async def ai_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text or msg.text.startswith("/"):
+        return
+
+    should_reply = (
+        update.effective_chat.type == ChatType.PRIVATE
+        or (msg.reply_to_message and msg.reply_to_message.from_user.id == context.bot.id)
+        or any(msg.text.lower().startswith(k) for k in ["hey", "hi", "mikasa"])
     )
-    # Random human-like delay (0.5 to 2.5 seconds)
-    await asyncio.sleep(random.uniform(0.8, 2.0))
+    if should_reply:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+        res, code = await get_ai_response(update.effective_chat.id, msg.text, msg.from_user.first_name)
 
-# =============== /start COMMAND ===============
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_name = update.effective_user.first_name
-    
-    # Buttons
-    keyboard = [
-        [
-            InlineKeyboardButton("👥 Group", url="https://t.me/midnight_chatclub"),
-            InlineKeyboardButton("📢 Channel", url="https://t.me/anonymous_rides"),
-        ],
-        [
-            InlineKeyboardButton("👑 Owner", url="https://t.me/light_speedy"),
-            InlineKeyboardButton("➕ Add to Group", url=f"https://t.me/{context.bot.username}?startgroup=true"),
-        ]
-    ]
-    
-    welcome_text = f"""🤍 *Hey {user_name}!* 🤍
+        # Send response
+        await msg.reply_text(res if code else nezuko_style(res))
+        
+        # Send a random sticker 80% of the time
+        if random.random() < 0.8:
+            await send_ai_sticker(update, context)
 
-Main *Mikasa* hoon. Eren nahi hai ab, lekin main yahan hoon tumhare saath.
-
-⚔️ *Mujhse kuch bhi baat kar sakte ho*
-Main yaad rakhti hoon jo tum bologe. Dost hoon, bot nahi.
-
----
-
-**🔗 Join karne ke liye neeche click karo:**"""
-
-    await update.message.reply_text(
-        welcome_text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# =============== /reset COMMAND ===============
-async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in user_chats:
-        # Start fresh chat
-        user_chats[user_id] = model.start_chat(history=[])
-        user_chats[user_id].send_message(SYSTEM_PROMPT)
-    await update.message.reply_text("⚔️ *Conversation reset.* Main phir se yahan hoon.", parse_mode="Markdown")
-
-# =============== NORMAL MESSAGE HANDLER ===============
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_message = update.message.text
-    
-    logger.info(f"User {user_id}: {user_message[:50]}")
-    
-    # Show typing indicator
-    await typing_action(update, context)
-    
-    # Get AI reply
-    reply = await get_reply(user_id, user_message)
-    
-    # Send reply
-    await update.message.reply_text(reply)
-
-# =============== MAIN FUNCTION ===============
-async def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # Clear any existing webhook
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook cleared!")
-    
-    # Add handlers
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("reset", reset_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("🤍 Mikasa Chatbot is starting... 🤍")
-    
-    # Start polling
-    await app.run_polling()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# === /ask command handler ===
+async def ask_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("💬 Please type something after /ask")
+        return
+    user_input = " ".join(context.args)
+    res, code = await get_ai_response(update.effective_chat.id, user_input, update.effective_user.first_name)
+    await update.message.reply_text(res if code else nezuko_style(res))
